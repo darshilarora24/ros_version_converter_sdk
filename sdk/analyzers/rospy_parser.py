@@ -48,7 +48,14 @@ def analyze_python_file(py_path: Path) -> NodeIR | None:
                         msg_type = ''
                         if isinstance(n.args[1], ast.Name):
                             msg_type = n.args[1].id
-                        node_ir.subs.append(TopicIR(topic=topic, type=msg_type))
+                        cb = None
+                        if len(n.args) >= 3:
+                            if isinstance(n.args[2], ast.Name):
+                                cb = n.args[2].id
+                            elif isinstance(n.args[2], ast.Attribute):
+                                # Simple attr like self.cb or module.cb
+                                cb = n.args[2].attr
+                        node_ir.subs.append(TopicIR(topic=topic, type=msg_type, callback=cb))
             finally:
                 self.generic_visit(n)
 
@@ -63,4 +70,3 @@ def analyze_python_sources(pkg_path: Path) -> List[NodeIR]:
         if ir:
             nodes.append(ir)
     return nodes
-

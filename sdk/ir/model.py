@@ -9,6 +9,7 @@ from typing import List, Optional
 class TopicIR:
     topic: str
     type: str = ""
+    callback: Optional[str] = None
     qos_hint: Optional[str] = None
 
 
@@ -35,4 +36,3 @@ class PackageIR:
     msgs: List[str] = field(default_factory=list)
     srvs: List[str] = field(default_factory=list)
     actions: List[str] = field(default_factory=list)
-

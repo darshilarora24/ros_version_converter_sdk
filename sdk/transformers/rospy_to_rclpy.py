@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-from sdk.ir.model import PackageIR
+from sdk.ir.model import PackageIR, NodeIR
+from sdk.analyzers.rospy_parser import analyze_python_file
 
 
 PKG_XML_TEMPLATE = """<?xml version="1.0"?>
@@ -72,17 +73,22 @@ def convert_python_package_skeleton(src_pkg: Path, out_ws: Path, pkg: PackageIR)
         if src_dir.exists():
             shutil.copytree(src_dir, ros2_pkg_dir / iface, dirs_exist_ok=True)
 
-    # Copy python scripts into the module dir, add TODO header
+    # Copy or transform python scripts into the module dir
     entries = []
     for py in _ros1_py_scripts(src_pkg):
         rel_name = py.stem
         dst = module_dir / f"{rel_name}.py"
-        text = py.read_text(encoding='utf-8')
-        header = (
-            "# AUTO-GENERATED SKELETON\n"
-            "# TODO: convert rospy → rclpy (use SDK transformer)\n\n"
-        )
-        dst.write_text(header + text, encoding='utf-8')
+        transformed = transform_rospy_file(py)
+        if transformed is None:
+            # Fallback: copy with TODO header
+            text = py.read_text(encoding='utf-8')
+            header = (
+                "# AUTO-GENERATED SKELETON\n"
+                "# TODO: convert rospy → rclpy (use SDK transformer)\n\n"
+            )
+            dst.write_text(header + text, encoding='utf-8')
+        else:
+            dst.write_text(transformed, encoding='utf-8')
         entries.append(f"    {rel_name} = {pkg.name}.{rel_name}:main")
 
     # package.xml
@@ -103,3 +109,108 @@ def convert_python_package_skeleton(src_pkg: Path, out_ws: Path, pkg: PackageIR)
         encoding='utf-8'
     )
 
+
+def _collect_non_rospy_imports(src: str) -> List[str]:
+    import ast
+    lines: List[str] = []
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return lines
+    for n in tree.body:
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            # Skip rospy imports
+            if isinstance(n, ast.Import) and any(a.name == 'rospy' for a in n.names):
+                continue
+            if isinstance(n, ast.ImportFrom) and (n.module == 'rospy' or (n.module and n.module.startswith('rospy.'))):
+                continue
+            seg = ast.get_source_segment(src, n)
+            if seg:
+                lines.append(seg.strip())
+    return lines
+
+
+def _collect_defs(src: str) -> List[str]:
+    import ast
+    out: List[str] = []
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return out
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            seg = ast.get_source_segment(src, n)
+            if seg:
+                out.append(seg.rstrip())
+    return out
+
+
+def _rewrite_logging_in_text(src: str) -> str:
+    # Naive replacements to avoid unresolved rospy logging
+    src = src.replace('rospy.logdebug', 'rclpy.logging.get_logger("migrated").debug')
+    src = src.replace('rospy.loginfo', 'rclpy.logging.get_logger("migrated").info')
+    src = src.replace('rospy.logwarn', 'rclpy.logging.get_logger("migrated").warn')
+    src = src.replace('rospy.logerr', 'rclpy.logging.get_logger("migrated").error')
+    return src
+
+
+def transform_rospy_file(path: Path) -> Optional[str]:
+    """Attempt a first-pass rospy→rclpy transformation for simple pub/sub nodes.
+
+    - Keeps non-rospy imports and all defs (functions/classes) from original file
+    - Generates a Node subclass that creates publishers/subscriptions discovered
+    - Adds a main() that inits and spins the node
+    - Applies naive logging rewrite in kept defs
+
+    Returns new source text, or None if the file does not look like a rospy node.
+    """
+    src = path.read_text(encoding='utf-8')
+    node_ir: Optional[NodeIR] = analyze_python_file(path)
+    if node_ir is None:
+        return None
+
+    # Gather imports and defs
+    imports = _collect_non_rospy_imports(src)
+    defs_src = _collect_defs(_rewrite_logging_in_text(src))
+
+    lines: List[str] = []
+    # Imports
+    lines.extend(imports)
+    lines.append('import rclpy')
+    lines.append('from rclpy.node import Node')
+    lines.append('')
+    # Keep defs
+    if defs_src:
+        lines.extend(defs_src)
+        lines.append('')
+
+    # Node class
+    lines.append('class MigratedNode(Node):')
+    lines.append("    def __init__(self):")
+    lines.append("        super().__init__('migrated_node')")
+    if node_ir.pubs:
+        lines.append("        # Publishers")
+        for i, p in enumerate(node_ir.pubs):
+            typ = p.type or 'TODO_MSG_TYPE'
+            topic = p.topic or 'TODO_TOPIC'
+            lines.append(f"        self.publisher_{i} = self.create_publisher({typ}, '{topic}', 10)")
+    if node_ir.subs:
+        lines.append("        # Subscriptions")
+        for i, s in enumerate(node_ir.subs):
+            typ = s.type or 'TODO_MSG_TYPE'
+            topic = s.topic or 'TODO_TOPIC'
+            cb = s.callback or 'lambda msg: None  # TODO: set callback'
+            lines.append(f"        self.subscription_{i} = self.create_subscription({typ}, '{topic}', {cb}, 10)")
+    lines.append('')
+
+    # main()
+    lines.append('def main():')
+    lines.append('    rclpy.init()')
+    lines.append('    node = MigratedNode()')
+    lines.append('    rclpy.spin(node)')
+    lines.append('    rclpy.shutdown()')
+    lines.append('')
+    lines.append("if __name__ == '__main__':")
+    lines.append('    main()')
+
+    return "\n".join(lines)
