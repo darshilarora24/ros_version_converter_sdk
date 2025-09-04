@@ -1,0 +1,6 @@
+queue_to_qos:
+  default_depth: 10
+  latched_to_transient_local: true
+  sensor_data_topics:
+    - "/camera"
+    - "/lidar"

@@ -1,0 +1,23 @@
+functions:
+  rospy.init_node: rclpy.init
+  rospy.spin: rclpy.spin
+  rospy.sleep: rclpy.sleep
+  rospy.is_shutdown: rclpy.ok
+  rospy.Time.now: node.get_clock().now
+  rospy.Duration: rclpy.duration.Duration
+  rospy.Rate: rclpy.Rate
+logging:
+  rospy.logdebug: node.get_logger().debug
+  rospy.loginfo: node.get_logger().info
+  rospy.logwarn: node.get_logger().warn
+  rospy.logerr: node.get_logger().error
+pubsub:
+  publisher_method: create_publisher
+  subscription_method: create_subscription
+params:
+  get: node.get_parameter
+  set: node.set_parameters
+  declare: node.declare_parameter
+tf:
+  tf::Listener: tf2_ros::TransformListener
+  tf::TransformBroadcaster: tf2_ros::TransformBroadcaster
