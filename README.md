@@ -38,6 +38,10 @@ This installs the `ros-migrate` entrypoint (see `[project.scripts]` in `pyprojec
 
 Run `ros-migrate -h` or subcommand `-h` for details.
 
+## Testing
+- Quick smoke test without installing: `python -m cli.ros_migrate -h`
+- Run the unit tests (stdlib `unittest`): `python -m unittest -v`
+
 ## Examples
 Analyze a ROS1 package:
 ```bash
