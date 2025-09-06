@@ -11,6 +11,8 @@ class TopicIR:
     type: str = ""
     callback: Optional[str] = None
     qos_hint: Optional[str] = None
+    queue_size: Optional[int] = None
+    latched: Optional[bool] = None
 
 
 @dataclass

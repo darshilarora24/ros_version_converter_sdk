@@ -40,7 +40,17 @@ def analyze_python_file(py_path: Path) -> NodeIR | None:
                         msg_type = ''
                         if isinstance(n.args[1], ast.Name):
                             msg_type = n.args[1].id
-                        node_ir.pubs.append(TopicIR(topic=topic, type=msg_type))
+                        queue_size = None
+                        latched = None
+                        for kw in n.keywords or []:
+                            if kw.arg == 'queue_size' and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
+                                try:
+                                    queue_size = int(kw.value.value)
+                                except Exception:
+                                    pass
+                            if kw.arg == 'latch' and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+                                latched = bool(kw.value.value)
+                        node_ir.pubs.append(TopicIR(topic=topic, type=msg_type, queue_size=queue_size, latched=latched))
                     elif n.func.attr == 'Subscriber' and len(n.args) >= 2:
                         topic = ''
                         if isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str):
@@ -55,7 +65,14 @@ def analyze_python_file(py_path: Path) -> NodeIR | None:
                             elif isinstance(n.args[2], ast.Attribute):
                                 # Simple attr like self.cb or module.cb
                                 cb = n.args[2].attr
-                        node_ir.subs.append(TopicIR(topic=topic, type=msg_type, callback=cb))
+                        queue_size = None
+                        for kw in n.keywords or []:
+                            if kw.arg == 'queue_size' and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
+                                try:
+                                    queue_size = int(kw.value.value)
+                                except Exception:
+                                    pass
+                        node_ir.subs.append(TopicIR(topic=topic, type=msg_type, callback=cb, queue_size=queue_size))
             finally:
                 self.generic_visit(n)
 

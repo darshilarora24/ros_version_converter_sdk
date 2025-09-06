@@ -68,23 +68,104 @@ def cmd_launch(args: argparse.Namespace) -> int:
         print(f"[launch] Failed to parse: {e}")
         return 1
     launch_py = out_pkg / (in_launch.stem + ".launch.py")
-    # Minimal launch generator (no Jinja dependency)
+    # Enhanced launch generator (args/params/remaps/groups/includes/conditions)
     with open(launch_py, 'w', encoding='utf-8') as f:
         f.write("""#!/usr/bin/env python3
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition, UnlessCondition
 from launch_ros.actions import Node
 
 
+def _as_expr(value: str):
+    # $(arg name) → LaunchConfiguration('name'); else quoted string
+    if value is None:
+        return None
+    value = value.strip()
+    if value.startswith('$(arg ') and value.endswith(')'):
+        name = value[len('$(arg '):-1].strip()
+        return f"LaunchConfiguration('{name}')"
+    return repr(value)
+
+
+def _cond_expr(expr: str):
+    if expr is None:
+        return None
+    expr = expr.strip()
+    if expr.startswith('$(arg ') and expr.endswith(')'):
+        name = expr[len('$(arg '):-1].strip()
+        return f"LaunchConfiguration('{name}')"
+    # best-effort: treat as string substitution
+    return repr(expr)
+
+
 def generate_launch_description():
-    nodes = []
+    actions = []
 """)
+        # Declare arguments
+        if getattr(launch_ir, 'args', None):
+            for a in launch_ir.args:
+                name = a.name
+                default = a.default
+                desc = a.description or ''
+                default_expr = _safe = repr(default) if default is not None else None
+                if default_expr is not None:
+                    f.write(f"    actions.append(DeclareLaunchArgument('{name}', default_value={default_expr}, description={repr(desc)}))\n")
+                else:
+                    f.write(f"    actions.append(DeclareLaunchArgument('{name}', description={repr(desc)}))\n")
+        # Includes
+        if getattr(launch_ir, 'includes', None):
+            for inc in launch_ir.includes:
+                file_expr = repr(inc.file)
+                args_items = ", ".join([f"('{k}', {_as_expr(v)})" for (k, v) in inc.args])
+                args_kw = f", launch_arguments={{ {args_items} }}.items()" if args_items else ""
+                cond_kw = ""
+                if inc.cond_if:
+                    cond_kw = f", condition=IfCondition({_cond_expr(inc.cond_if)})"
+                elif inc.cond_unless:
+                    cond_kw = f", condition=UnlessCondition({_cond_expr(inc.cond_unless)})"
+                # IncludeLaunchDescription does not take a namespace kw; apply ns via a GroupAction in future
+                f.write("    actions.append(IncludeLaunchDescription(PythonLaunchDescriptionSource(" + file_expr + ")" + args_kw + cond_kw + "))\n")
+
+        # Nodes
         for n in launch_ir.nodes:
             pkg = n.package or ''
             exe = n.executable or ''
             name = n.name or ''
-            f.write(f"    nodes.append(Node(package='{pkg}', executable='{exe}', name='{name}'))\n")
+            ns = n.namespace
+            # remaps list
+            if n.remaps:
+                remap_items = ", ".join([f"('{frm}', '{to}')" for (frm, to) in n.remaps])
+                remaps_expr = f"remappings=[{remap_items}]"
+            else:
+                remaps_expr = None
+            # parameters list
+            param_items = []
+            for p in n.params:
+                if p.file:
+                    param_items.append(repr(p.file))
+                elif p.name is not None:
+                    val_expr = 'None' if p.value is None else (
+                        f"LaunchConfiguration('{p.value[6:-1].strip()}')" if (isinstance(p.value, str) and p.value.strip().startswith('$(arg ') and p.value.strip().endswith(')')) else repr(p.value)
+                    )
+                    param_items.append("{" + repr(p.name) + ": " + val_expr + "}")
+            params_expr = f"parameters=[{', '.join(param_items)}]" if param_items else None
+            parts = [f"package='{pkg}'", f"executable='{exe}'", f"name='{name}'"]
+            if ns:
+                parts.append(f"namespace='{ns}'")
+            if remaps_expr:
+                parts.append(remaps_expr)
+            if params_expr:
+                parts.append(params_expr)
+            if getattr(n, 'cond_if', None):
+                parts.append(f"condition=IfCondition({_cond_expr(n.cond_if)})")
+            elif getattr(n, 'cond_unless', None):
+                parts.append(f"condition=UnlessCondition({_cond_expr(n.cond_unless)})")
+            f.write("    actions.append(Node(" + ", ".join(parts) + "))\n")
         f.write("""
-    return LaunchDescription(nodes)
+    return LaunchDescription(actions)
 """)
     print(f"[launch] Wrote {launch_py}")
     return 0
@@ -151,4 +232,3 @@ def main(argv=None) -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-
