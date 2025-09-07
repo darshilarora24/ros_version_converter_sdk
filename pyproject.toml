@@ -14,3 +14,5 @@ dependencies = []
 [project.scripts]
 ros-migrate = "cli.ros_migrate:main"
 
+[tool.setuptools]
+packages = ["sdk", "cli"]
