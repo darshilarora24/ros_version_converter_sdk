@@ -4,16 +4,22 @@ from rclpy.node import Node
 
 
 class MigratedNode(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('migrated_node')
-        # TODO: declare parameters and create publishers/subscriptions
+        # TODO: declare publishers, subscriptions, and timers
 
 
-def main():
-    rclpy.init()
+def main(args=None) -> None:
+    rclpy.init(args=args)
     node = MigratedNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('Shutting down (keyboard interrupt).')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

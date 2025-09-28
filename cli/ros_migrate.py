@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import argparse
-import os
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 # Local imports (stdlib-only scaffold)
@@ -9,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sdk.analyzers.package_parser import parse_package
 from sdk.analyzers.rospy_parser import analyze_python_sources
 from sdk.analyzers.roslaunch_parser import parse_launch_file
-from sdk.ir.model import PackageIR
 from sdk.transformers.rospy_to_rclpy import convert_python_package_skeleton
 
 
@@ -45,7 +46,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
     except Exception as e:
         print(f"[convert] Failed to parse package: {e}")
         return 1
-    print(f"[convert] Converting package '{pkg.name}' → ROS2 (lang={args.lang})")
+    print(f"[convert] Converting package '{pkg.name}' -> ROS2 (lang={args.lang})")
     try:
         convert_python_package_skeleton(src_path, out_ws, pkg)
     except Exception as e:
@@ -68,107 +69,217 @@ def cmd_launch(args: argparse.Namespace) -> int:
         print(f"[launch] Failed to parse: {e}")
         return 1
     launch_py = out_pkg / (in_launch.stem + ".launch.py")
-    # Enhanced launch generator (args/params/remaps/groups/includes/conditions)
-    with open(launch_py, 'w', encoding='utf-8') as f:
-        f.write("""#!/usr/bin/env python3
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.substitutions import LaunchConfiguration
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.conditions import IfCondition, UnlessCondition
-from launch_ros.actions import Node
-
-
-def _as_expr(value: str):
-    # $(arg name) → LaunchConfiguration('name'); else quoted string
-    if value is None:
-        return None
-    value = value.strip()
-    if value.startswith('$(arg ') and value.endswith(')'):
-        name = value[len('$(arg '):-1].strip()
-        return f"LaunchConfiguration('{name}')"
-    return repr(value)
-
-
-def _cond_expr(expr: str):
-    if expr is None:
-        return None
-    expr = expr.strip()
-    if expr.startswith('$(arg ') and expr.endswith(')'):
-        name = expr[len('$(arg '):-1].strip()
-        return f"LaunchConfiguration('{name}')"
-    # best-effort: treat as string substitution
-    return repr(expr)
-
-
-def generate_launch_description():
-    actions = []
-""")
-        # Declare arguments
-        if getattr(launch_ir, 'args', None):
-            for a in launch_ir.args:
-                name = a.name
-                default = a.default
-                desc = a.description or ''
-                default_expr = _safe = repr(default) if default is not None else None
-                if default_expr is not None:
-                    f.write(f"    actions.append(DeclareLaunchArgument('{name}', default_value={default_expr}, description={repr(desc)}))\n")
-                else:
-                    f.write(f"    actions.append(DeclareLaunchArgument('{name}', description={repr(desc)}))\n")
-        # Includes
-        if getattr(launch_ir, 'includes', None):
-            for inc in launch_ir.includes:
-                file_expr = repr(inc.file)
-                args_items = ", ".join([f"('{k}', {_as_expr(v)})" for (k, v) in inc.args])
-                args_kw = f", launch_arguments={{ {args_items} }}.items()" if args_items else ""
-                cond_kw = ""
-                if inc.cond_if:
-                    cond_kw = f", condition=IfCondition({_cond_expr(inc.cond_if)})"
-                elif inc.cond_unless:
-                    cond_kw = f", condition=UnlessCondition({_cond_expr(inc.cond_unless)})"
-                # IncludeLaunchDescription does not take a namespace kw; apply ns via a GroupAction in future
-                f.write("    actions.append(IncludeLaunchDescription(PythonLaunchDescriptionSource(" + file_expr + ")" + args_kw + cond_kw + "))\n")
-
-        # Nodes
-        for n in launch_ir.nodes:
-            pkg = n.package or ''
-            exe = n.executable or ''
-            name = n.name or ''
-            ns = n.namespace
-            # remaps list
-            if n.remaps:
-                remap_items = ", ".join([f"('{frm}', '{to}')" for (frm, to) in n.remaps])
-                remaps_expr = f"remappings=[{remap_items}]"
-            else:
-                remaps_expr = None
-            # parameters list
-            param_items = []
-            for p in n.params:
-                if p.file:
-                    param_items.append(repr(p.file))
-                elif p.name is not None:
-                    val_expr = 'None' if p.value is None else (
-                        f"LaunchConfiguration('{p.value[6:-1].strip()}')" if (isinstance(p.value, str) and p.value.strip().startswith('$(arg ') and p.value.strip().endswith(')')) else repr(p.value)
-                    )
-                    param_items.append("{" + repr(p.name) + ": " + val_expr + "}")
-            params_expr = f"parameters=[{', '.join(param_items)}]" if param_items else None
-            parts = [f"package='{pkg}'", f"executable='{exe}'", f"name='{name}'"]
-            if ns:
-                parts.append(f"namespace='{ns}'")
-            if remaps_expr:
-                parts.append(remaps_expr)
-            if params_expr:
-                parts.append(params_expr)
-            if getattr(n, 'cond_if', None):
-                parts.append(f"condition=IfCondition({_cond_expr(n.cond_if)})")
-            elif getattr(n, 'cond_unless', None):
-                parts.append(f"condition=UnlessCondition({_cond_expr(n.cond_unless)})")
-            f.write("    actions.append(Node(" + ", ".join(parts) + "))\n")
-        f.write("""
-    return LaunchDescription(actions)
-""")
+    launch_py.write_text(_render_launch_file(launch_ir, in_launch.name), encoding='utf-8')
     print(f"[launch] Wrote {launch_py}")
     return 0
+
+
+def _render_launch_file(launch_ir, source_name: str) -> str:
+    imports: OrderedDict[str, list[str]] = OrderedDict()
+    _add_import(imports, 'launch', 'LaunchDescription')
+    _add_import(imports, 'launch_ros.actions', 'Node')
+
+    lines: list[str] = ['#!/usr/bin/env python3', '', f"# Auto-generated from {source_name}", '']
+
+    body: list[str] = ['def generate_launch_description():', '    actions = []']
+    section_started = False
+
+    if getattr(launch_ir, 'args', None):
+        _add_import(imports, 'launch.actions', 'DeclareLaunchArgument')
+        for arg in launch_ir.args:
+            arg_kwargs: list[str] = []
+            comments: list[str] = []
+            if arg.default is not None:
+                default_expr, default_comment = _value_expr(arg.default, imports)
+                arg_kwargs.append(f'default_value={default_expr}')
+                if default_comment:
+                    comments.append(default_comment)
+            if arg.description:
+                arg_kwargs.append(f'description={repr(arg.description)}')
+            for comment in _dedupe_comments(comments):
+                body.append(f'    {comment}')
+            call = f"DeclareLaunchArgument({repr(arg.name)}"
+            if arg_kwargs:
+                call += ', ' + ', '.join(arg_kwargs)
+            call += ')'
+            body.append(f'    actions.append({call})')
+        section_started = True
+
+    if getattr(launch_ir, 'includes', None):
+        if section_started:
+            body.append('')
+        _add_import(imports, 'launch.actions', 'IncludeLaunchDescription')
+        _add_import(imports, 'launch.launch_description_sources', 'PythonLaunchDescriptionSource')
+        for inc in launch_ir.includes:
+            comments: list[str] = []
+            file_expr, file_comment = _value_expr(inc.file, imports)
+            if file_comment:
+                comments.append(file_comment)
+            include_kwargs: list[str] = []
+            if inc.args:
+                arg_entries = []
+                for key, value in inc.args:
+                    val_expr, val_comment = _value_expr(value, imports)
+                    arg_entries.append(f"{repr(key)}: {val_expr}")
+                    if val_comment:
+                        comments.append(val_comment)
+                include_kwargs.append(f"launch_arguments={{ {', '.join(arg_entries)} }}.items()")
+            cond_expr = None
+            if inc.cond_if:
+                cond_expr, cond_comment = _value_expr(inc.cond_if, imports)
+                if cond_comment:
+                    comments.append(cond_comment)
+                _add_import(imports, 'launch.conditions', 'IfCondition')
+                include_kwargs.append(f'condition=IfCondition({cond_expr})')
+            elif inc.cond_unless:
+                cond_expr, cond_comment = _value_expr(inc.cond_unless, imports)
+                if cond_comment:
+                    comments.append(cond_comment)
+                _add_import(imports, 'launch.conditions', 'UnlessCondition')
+                include_kwargs.append(f'condition=UnlessCondition({cond_expr})')
+            include_call = f"IncludeLaunchDescription(PythonLaunchDescriptionSource({file_expr})"
+            if include_kwargs:
+                include_call += ', ' + ', '.join(include_kwargs)
+            include_call += ')'
+            for comment in _dedupe_comments(comments):
+                body.append(f'    {comment}')
+            if inc.namespace:
+                _add_import(imports, 'launch.actions', 'GroupAction')
+                _add_import(imports, 'launch_ros.actions', 'PushRosNamespace')
+                body.append('    actions.append(GroupAction([')
+                body.append(f'        PushRosNamespace({repr(inc.namespace)}),')
+                body.append(f'        {include_call}')
+                body.append('    ]))')
+            else:
+                body.append(f'    actions.append({include_call})')
+        section_started = True
+
+    if getattr(launch_ir, 'nodes', None):
+        if section_started:
+            body.append('')
+        for node in launch_ir.nodes:
+            comments: list[str] = []
+            pkg = node.package or 'TODO_PACKAGE'
+            if node.package is None:
+                comments.append('# TODO: set the correct package for this node')
+            exe = node.executable or 'TODO_EXECUTABLE'
+            if node.executable is None:
+                comments.append('# TODO: set the executable for this node')
+            node_kwargs: list[str] = [f'package={repr(pkg)}', f'executable={repr(exe)}']
+            if node.name:
+                node_kwargs.append(f'name={repr(node.name)}')
+            if node.output:
+                node_kwargs.append(f'output={repr(node.output)}')
+            if node.namespace:
+                ns_expr, ns_comment = _value_expr(node.namespace, imports)
+                node_kwargs.append(f'namespace={ns_expr}')
+                if ns_comment:
+                    comments.append(ns_comment)
+            if node.remaps:
+                remap_entries = []
+                for frm, to in node.remaps:
+                    frm_expr, frm_comment = _value_expr(frm, imports)
+                    to_expr, to_comment = _value_expr(to, imports)
+                    remap_entries.append(f'({frm_expr}, {to_expr})')
+                    if frm_comment:
+                        comments.append(frm_comment)
+                    if to_comment:
+                        comments.append(to_comment)
+                node_kwargs.append(f"remappings=[{', '.join(remap_entries)}]")
+            if node.params:
+                param_entries = []
+                for param in node.params:
+                    if param.file:
+                        file_expr, file_comment = _value_expr(param.file, imports)
+                        param_entries.append(file_expr)
+                        if file_comment:
+                            comments.append(file_comment)
+                    elif param.name is not None:
+                        val_expr, val_comment = _value_expr(param.value, imports)
+                        param_entries.append('{' + repr(param.name) + f': {val_expr}' + '}')
+                        if val_comment:
+                            comments.append(val_comment)
+                if param_entries:
+                    node_kwargs.append(f"parameters=[{', '.join(param_entries)}]")
+            if getattr(node, 'cond_if', None):
+                cond_expr, cond_comment = _value_expr(node.cond_if, imports)
+                _add_import(imports, 'launch.conditions', 'IfCondition')
+                node_kwargs.append(f'condition=IfCondition({cond_expr})')
+                if cond_comment:
+                    comments.append(cond_comment)
+            elif getattr(node, 'cond_unless', None):
+                cond_expr, cond_comment = _value_expr(node.cond_unless, imports)
+                _add_import(imports, 'launch.conditions', 'UnlessCondition')
+                node_kwargs.append(f'condition=UnlessCondition({cond_expr})')
+                if cond_comment:
+                    comments.append(cond_comment)
+            for comment in _dedupe_comments(comments):
+                body.append(f'    {comment}')
+            body.append(f"    actions.append(Node({', '.join(node_kwargs)}))")
+
+    body.append('    return LaunchDescription(actions)')
+
+    import_lines: list[str] = []
+    for module, names in imports.items():
+        if names:
+            import_lines.append(f"from {module} import {', '.join(names)}")
+        else:
+            import_lines.append(f'import {module}')
+
+    lines.extend(import_lines)
+    lines.append('')
+    lines.extend(body)
+    lines.append('')
+    return '\n'.join(lines)
+
+
+def _add_import(imports: OrderedDict[str, list[str]], module: str, name: str) -> None:
+    if module not in imports:
+        imports[module] = []
+    if name not in imports[module]:
+        imports[module].append(name)
+
+
+def _value_expr(raw_value, imports: OrderedDict[str, list[str]]) -> tuple[str, str | None]:
+    if raw_value is None:
+        return 'None', None
+    value = raw_value.strip()
+    if not value:
+        return "''", None
+    if value.startswith('$(arg ') and value.endswith(')'):
+        name = value[len('$(arg '):-1].strip()
+        _add_import(imports, 'launch.substitutions', 'LaunchConfiguration')
+        return f"LaunchConfiguration('{name}')", None
+    if value.startswith('$(env ') and value.endswith(')'):
+        name = value[len('$(env '):-1].strip()
+        _add_import(imports, 'launch.substitutions', 'EnvironmentVariable')
+        return f"EnvironmentVariable('{name}')", None
+    lowered = value.lower()
+    if lowered in {'true', 'false'}:
+        return lowered.capitalize(), None
+    try:
+        if value.startswith('0') and value not in {'0', '0.0'} and not value.startswith('0.'):
+            raise ValueError
+        return str(int(value)), None
+    except ValueError:
+        try:
+            return str(float(value)), None
+        except ValueError:
+            pass
+    if '$(find ' in value:
+        return repr(value), f"# TODO: replace substitution '{value}' with FindPackageShare/PathJoinSubstitution"
+    return repr(value), None
+
+
+def _dedupe_comments(comments: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for comment in comments:
+        if comment in seen:
+            continue
+        seen.add(comment)
+        ordered.append(comment)
+    return ordered
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -195,7 +306,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ros-migrate", description="ROS1 → ROS2 migration SDK (skeleton)")
+    p = argparse.ArgumentParser(prog="ros-migrate", description="ROS1 -> ROS2 migration SDK (skeleton)")
     sub = p.add_subparsers(dest='cmd', required=True)
 
     pa = sub.add_parser('analyze', help='Analyze a ROS1 package')
@@ -232,3 +343,4 @@ def main(argv=None) -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
