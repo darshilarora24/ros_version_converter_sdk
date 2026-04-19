@@ -26,14 +26,38 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 1
     nodes = analyze_python_sources(pkg_path)
     print("Package:")
-    print(f"- name: {pkg.name}")
-    print(f"- build_type: {pkg.build_type}")
-    print(f"- deps: {', '.join(pkg.deps) if pkg.deps else '(none)'}")
-    print("Python nodes:")
+    print(f"  name:       {pkg.name}")
+    print(f"  build_type: {pkg.build_type}")
+    print(f"  deps:       {', '.join(pkg.deps) if pkg.deps else '(none)'}")
+    if pkg.msgs:
+        print(f"  msgs:       {', '.join(pkg.msgs)}")
+    if pkg.srvs:
+        print(f"  srvs:       {', '.join(pkg.srvs)}")
+    if pkg.actions:
+        print(f"  actions:    {', '.join(pkg.actions)}")
+    print(f"Python nodes ({len(nodes)}):")
     for n in nodes:
-        pubs = ', '.join([f"{p.topic}:{p.type}" for p in n.pubs]) or '(none)'
-        subs = ', '.join([f"{s.topic}:{s.type}" for s in n.subs]) or '(none)'
-        print(f"- {n.name} (file={n.file}) pubs=[{pubs}] subs=[{subs}]")
+        pubs = ', '.join([f"{p.topic}[{p.type}]" for p in n.pubs]) or '(none)'
+        subs = ', '.join([f"{s.topic}[{s.type}]" for s in n.subs]) or '(none)'
+        print(f"  - {n.name} (file={n.file})")
+        print(f"      pubs:   {pubs}")
+        print(f"      subs:   {subs}")
+        if n.srvs:
+            servers = [s for s in n.srvs if not s.is_client]
+            clients = [s for s in n.srvs if s.is_client]
+            if servers:
+                print(f"      srv servers: {', '.join(f'{s.name}[{s.type}]' for s in servers)}")
+            if clients:
+                print(f"      srv clients: {', '.join(f'{s.name}[{s.type}]' for s in clients)}")
+        if n.params:
+            print(f"      params: {', '.join(p.name for p in n.params)}")
+        if n.timers:
+            timer_strs = [f"{t.callback}@{t.period}s" if t.period else t.callback for t in n.timers]
+            print(f"      timers: {', '.join(timer_strs)}")
+        if n.tf_usage:
+            print("      tf:     yes (requires tf2_ros migration)")
+        if n.clock_usage:
+            print("      clock:  yes (use self.get_clock().now())")
     return 0
 
 
@@ -283,25 +307,96 @@ def _dedupe_comments(comments: list[str]) -> list[str]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    from sdk.validators.basic import basic_checks
     pkg_path = Path(args.path).resolve()
-    missing = []
-    for rel in ["package.xml"]:
-        if not (pkg_path / rel).exists():
-            missing.append(rel)
-    if missing:
-        print(f"[check] Missing files: {', '.join(missing)}")
+    issues = basic_checks(pkg_path)
+    if issues:
+        for issue in issues:
+            print(f"[check] ISSUE: {issue}")
         return 1
-    print("[check] Basic checks passed.")
+    print("[check] All checks passed.")
     return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
     path = Path(args.path).resolve()
-    report = path / "ros_migrate_report.txt"
-    with open(report, 'w', encoding='utf-8') as f:
-        f.write("ROS Migrate Report (skeleton)\n")
-        f.write(f"Path: {path}\n")
-    print(f"[report] Wrote {report}")
+    report_path = path / "ros_migrate_report.txt"
+
+    lines = [
+        "ROS Migration Report",
+        "=" * 50,
+        f"Path: {path}",
+        "",
+    ]
+
+    try:
+        pkg = parse_package(path)
+        lines.append(f"Package:    {pkg.name}")
+        lines.append(f"Build type: {pkg.build_type}")
+        lines.append(f"Deps:       {', '.join(pkg.deps) if pkg.deps else '(none)'}")
+        if pkg.msgs:
+            lines.append(f"Messages:   {', '.join(pkg.msgs)}")
+        if pkg.srvs:
+            lines.append(f"Services:   {', '.join(pkg.srvs)}")
+        if pkg.actions:
+            lines.append(f"Actions:    {', '.join(pkg.actions)}")
+        lines.append("")
+
+        nodes = analyze_python_sources(path)
+        lines.append(f"Python Nodes: {len(nodes)}")
+        for n in nodes:
+            lines.append(f"  Node: {n.name} ({n.file})")
+            if n.pubs:
+                lines.append(f"    Publishers ({len(n.pubs)}): " +
+                             ', '.join(f"{p.topic}[{p.type}]" for p in n.pubs))
+            if n.subs:
+                lines.append(f"    Subscribers ({len(n.subs)}): " +
+                             ', '.join(f"{s.topic}[{s.type}]" for s in n.subs))
+            if n.srvs:
+                servers = [s for s in n.srvs if not s.is_client]
+                clients = [s for s in n.srvs if s.is_client]
+                if servers:
+                    lines.append(f"    Srv Servers ({len(servers)}): " +
+                                 ', '.join(f"{s.name}[{s.type}]" for s in servers))
+                if clients:
+                    lines.append(f"    Srv Clients ({len(clients)}): " +
+                                 ', '.join(f"{s.name}[{s.type}]" for s in clients))
+            if n.params:
+                lines.append(f"    Parameters ({len(n.params)}): " +
+                             ', '.join(p.name for p in n.params))
+            if n.timers:
+                timer_strs = [f"{t.callback}@{t.period}s" if t.period else t.callback for t in n.timers]
+                lines.append(f"    Timers ({len(n.timers)}): " + ', '.join(timer_strs))
+            if n.tf_usage:
+                lines.append("    TF usage:    yes (requires tf2_ros migration)")
+            if n.clock_usage:
+                lines.append("    Clock usage: yes (use self.get_clock().now())")
+    except Exception as exc:
+        lines.append(f"Note: could not analyze as ROS1 package ({exc})")
+
+    lines.append("")
+    lines.append("Manual Follow-Up (TODOs in generated Python files):")
+    todo_total = 0
+    try:
+        for py in sorted(path.rglob("*.py")):
+            try:
+                text = py.read_text(encoding='utf-8')
+                count = text.count('TODO')
+                if count:
+                    todo_total += count
+                    lines.append(f"  {py.relative_to(path)}: {count} TODO(s)")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if todo_total == 0:
+        lines.append("  (none found)")
+    lines.append("")
+    lines.append(f"Total TODOs: {todo_total}")
+
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f"[report] Wrote {report_path}")
     return 0
 
 

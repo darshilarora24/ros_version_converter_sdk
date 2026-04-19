@@ -16,15 +16,35 @@ class TopicIR:
 
 
 @dataclass
+class ServiceIR:
+    name: str
+    type: str = ""
+    handler: Optional[str] = None
+    is_client: bool = False
+
+
+@dataclass
+class ParamIR:
+    name: str
+    default: Optional[str] = None
+
+
+@dataclass
+class TimerIR:
+    callback: str
+    period: Optional[float] = None
+
+
+@dataclass
 class NodeIR:
     name: str
     lang: str = "py"
     file: str = ""
     pubs: List[TopicIR] = field(default_factory=list)
     subs: List[TopicIR] = field(default_factory=list)
-    srvs: List[str] = field(default_factory=list)
-    params: List[str] = field(default_factory=list)
-    timers: List[str] = field(default_factory=list)
+    srvs: List[ServiceIR] = field(default_factory=list)
+    params: List[ParamIR] = field(default_factory=list)
+    timers: List[TimerIR] = field(default_factory=list)
     tf_usage: bool = False
     clock_usage: bool = False
 

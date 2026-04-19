@@ -156,8 +156,14 @@ def _collect_non_rospy_imports(src: str) -> List[str]:
             if isinstance(node, ast.Import):
                 if any(alias.name == 'rospy' for alias in node.names):
                     continue
+                # Drop tf/tf2 imports — we'll add tf2_ros ourselves when needed
+                if any(alias.name in ('tf', 'tf2') for alias in node.names):
+                    continue
             if isinstance(node, ast.ImportFrom):
                 if node.module == 'rospy' or (node.module and node.module.startswith('rospy.')):
+                    continue
+                # Drop old tf imports in favour of tf2_ros
+                if node.module and (node.module.startswith('tf.') or node.module == 'tf'):
                     continue
             segment = ast.get_source_segment(src, node)
             if segment:
@@ -241,10 +247,22 @@ def _extract_rate_period(src: str) -> Optional[float]:
         return None
 
 
+def _safe_name(s: str) -> str:
+    """Convert a topic/service name to a safe Python identifier."""
+    cleaned = re.sub(r'[^a-zA-Z0-9_]', '_', s).strip('_')
+    return cleaned or 'unknown'
+
+
 def _format_msg_type(type_name: str) -> tuple[str, Optional[str]]:
     if type_name:
         return type_name, None
     return 'TODO_MSG_TYPE', '# TODO: replace TODO_MSG_TYPE with the correct message type'
+
+
+def _format_srv_type(type_name: str) -> tuple[str, Optional[str]]:
+    if type_name:
+        return type_name, None
+    return 'TODO_SRV_TYPE', '# TODO: replace TODO_SRV_TYPE with the correct service type'
 
 
 def _format_topic(topic: str) -> tuple[str, Optional[str]]:
@@ -300,6 +318,10 @@ def transform_rospy_file(path: Path) -> Optional[str]:
     _ensure_import(imports, 'from rclpy.node import Node', after='import rclpy')
     if any(getattr(p, 'latched', None) for p in node_ir.pubs):
         _ensure_import(imports, 'from rclpy.qos import QoSProfile, QoSDurabilityPolicy')
+    if node_ir.tf_usage:
+        _ensure_import(imports, 'import tf2_ros')
+    if node_ir.clock_usage:
+        _ensure_import(imports, 'from rclpy.clock import Clock')
 
     rewritten_src = _rewrite_logging_in_text(src, logger_name)
     defs_src = _collect_defs(rewritten_src, skip=['main'])
@@ -321,7 +343,7 @@ def transform_rospy_file(path: Path) -> Optional[str]:
     default_depth = (qos_map or {}).get('default_depth') or 10
 
     timer_period = _extract_rate_period(src)
-    needs_timer_stub = timer_period is not None
+    needs_rate_timer_stub = timer_period is not None
 
     lines: List[str] = []
     if shebang:
@@ -351,12 +373,14 @@ def transform_rospy_file(path: Path) -> Optional[str]:
 
     init_lines: List[str] = []
 
-    if timer_period:
+    # rospy.Rate → timer stub
+    if needs_rate_timer_stub:
         init_lines.append('        # TODO: replace rospy.Rate loop with a real timer callback')
         init_lines.append(
             f'        self.timer = self.create_timer({timer_period}, getattr(self, "_tick", lambda: None))'
         )
 
+    # Publishers
     if node_ir.pubs:
         init_lines.append('        # Publishers')
         for index, pub in enumerate(node_ir.pubs):
@@ -379,6 +403,7 @@ def transform_rospy_file(path: Path) -> Optional[str]:
                     f'        self.publisher_{index} = self.{publisher_method}({msg_expr}, {topic_expr}, {depth})'
                 )
 
+    # Subscriptions
     if node_ir.subs:
         init_lines.append('        # Subscriptions')
         for index, sub in enumerate(node_ir.subs):
@@ -393,6 +418,65 @@ def transform_rospy_file(path: Path) -> Optional[str]:
                 f'        self.subscription_{index} = self.{subscription_method}({msg_expr}, {topic_expr}, {cb_expr}, {depth})'
             )
 
+    # Service servers and clients
+    srv_servers = [s for s in node_ir.srvs if not s.is_client]
+    srv_clients = [s for s in node_ir.srvs if s.is_client]
+
+    if srv_servers:
+        init_lines.append('        # Service Servers')
+        for srv in srv_servers:
+            srv_type, srv_comment = _format_srv_type(srv.type)
+            topic_expr, topic_comment = _format_topic(srv.name)
+            handler = srv.handler or f'self.handle_{_safe_name(srv.name)}'
+            for note in [c for c in (srv_comment, topic_comment) if c]:
+                init_lines.append(f'        {note}')
+            init_lines.append(
+                f'        self.srv_{_safe_name(srv.name)} = self.create_service({srv_type}, {topic_expr}, {handler})'
+            )
+
+    if srv_clients:
+        init_lines.append('        # Service Clients')
+        for srv in srv_clients:
+            srv_type, srv_comment = _format_srv_type(srv.type)
+            topic_expr, topic_comment = _format_topic(srv.name)
+            for note in [c for c in (srv_comment, topic_comment) if c]:
+                init_lines.append(f'        {note}')
+            init_lines.append(
+                f'        self.cli_{_safe_name(srv.name)} = self.create_client({srv_type}, {topic_expr})'
+            )
+
+    # Parameters
+    if node_ir.params:
+        init_lines.append('        # Parameters')
+        for param in node_ir.params:
+            if param.default is not None:
+                init_lines.append(f'        self.declare_parameter({repr(param.name)}, {param.default})')
+            else:
+                init_lines.append(f'        # TODO: provide a default value for parameter {repr(param.name)}')
+                init_lines.append(f'        self.declare_parameter({repr(param.name)})')
+
+    # Explicit timers (rospy.Timer)
+    if node_ir.timers:
+        init_lines.append('        # Timers (from rospy.Timer)')
+        for tmr in node_ir.timers:
+            cb = tmr.callback
+            cb_expr = cb if cb.startswith('self.') else f'self.{cb}'
+            if tmr.period is not None:
+                init_lines.append(f'        self.timer_{_safe_name(cb)} = self.create_timer({tmr.period}, {cb_expr})')
+            else:
+                init_lines.append('        # TODO: set the timer period in seconds')
+                init_lines.append(f'        self.timer_{_safe_name(cb)} = self.create_timer(TODO_PERIOD, {cb_expr})')
+
+    # TF2
+    if node_ir.tf_usage:
+        init_lines.append('        # TF2 (migrated from tf)')
+        init_lines.append('        self.tf_buffer = tf2_ros.Buffer()')
+        init_lines.append('        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)')
+
+    # Clock note
+    if node_ir.clock_usage:
+        init_lines.append('        # Clock: use self.get_clock().now() instead of rospy.Time.now()')
+
     if not init_lines:
         init_lines.append('        # TODO: port initialization logic from the original script')
         init_lines.append('        pass')
@@ -402,7 +486,18 @@ def transform_rospy_file(path: Path) -> Optional[str]:
 
     lines.extend(init_lines)
 
-    if needs_timer_stub:
+    # Service handler stubs
+    if srv_servers:
+        for srv in srv_servers:
+            handler_name = srv.handler or f'handle_{_safe_name(srv.name)}'
+            if handler_name.startswith('self.'):
+                handler_name = handler_name[5:]
+            lines.append('')
+            lines.append(f'    def {handler_name}(self, request, response):')
+            lines.append(f'        # TODO: implement service handler for {repr(srv.name)}')
+            lines.append('        return response')
+
+    if needs_rate_timer_stub:
         lines.append('')
         lines.append('    def _tick(self) -> None:')
         lines.append('        # TODO: migrate work that ran inside the rospy.Rate loop')
@@ -424,4 +519,3 @@ def transform_rospy_file(path: Path) -> Optional[str]:
     lines.append('    main()')
 
     return "\n".join(lines) + "\n"
-
